@@ -1,0 +1,41 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:DemoSpline.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        x:Class="DemoSpline.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="DemoSpline">
+
+    <Design.DataContext>
+        <!-- This only sets the DataContext for the previewer in an IDE,
+             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
+        <Menu>
+            <MenuItem Header="File">
+                <MenuItem Header="Load from JSON" Click="OnLoadJson"/>
+                <MenuItem Header="Save to JSON" Click="OnSaveJson"/>
+            </MenuItem>
+            <MenuItem Header="Edit">
+                <MenuItem Header="Delete point" Click="OnDeletePoint"/>
+            </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Show grid" Click="OnToggleGrid" x:Name="ShowGridMenu"/>
+            </MenuItem>
+            <MenuItem Header="Tools">
+                <MenuItem Header="Open Tuner" Click="OnOpenTuner"/>
+                <MenuItem Header="Use raw cubic (no curvature adjust)" Click="OnToggleRawCubic" x:Name="RawCubicMenu"/>
+            </MenuItem>
+            <MenuItem Header="Help">
+                <MenuItem Header="About &amp; help" Click="OnOpenHelp"/>
+            </MenuItem>
+        </Menu>
+        <Canvas x:Name="EditorCanvas" Grid.Row="1" Background="#FFFFFFFF"/>
+    </Grid>
+
+</Window>
