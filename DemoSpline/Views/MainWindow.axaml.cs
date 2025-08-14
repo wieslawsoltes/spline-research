@@ -57,6 +57,7 @@ public partial class MainWindow : Window
     private MenuItem? _rawCubicMenuItem;
     private MenuItem? _editToolMenuItem;
     private MenuItem? _freehandToolMenuItem;
+    private MenuItem? _deletePointToolMenuItem;
     private Point? _pointerPos;
 	private bool _svgHover;
     private bool _useRawCubic;
@@ -64,7 +65,8 @@ public partial class MainWindow : Window
     private enum ToolMode
     {
         EditSpline,
-        FreehandTrace
+        FreehandTrace,
+        DeletePoint
     }
 
     private ToolMode _tool = ToolMode.EditSpline;
@@ -92,6 +94,7 @@ public partial class MainWindow : Window
             }
             _editToolMenuItem = this.FindControl<MenuItem>("EditToolMenu");
             _freehandToolMenuItem = this.FindControl<MenuItem>("FreehandToolMenu");
+            _deletePointToolMenuItem = this.FindControl<MenuItem>("DeletePointToolMenu");
             UpdateToolMenuChecks();
             RenderAll();
         };
@@ -331,6 +334,7 @@ public partial class MainWindow : Window
     {
         if (_editToolMenuItem != null) _editToolMenuItem.IsChecked = _tool == ToolMode.EditSpline;
         if (_freehandToolMenuItem != null) _freehandToolMenuItem.IsChecked = _tool == ToolMode.FreehandTrace;
+        if (_deletePointToolMenuItem != null) _deletePointToolMenuItem.IsChecked = _tool == ToolMode.DeletePoint;
     }
 
     private void OnSelectEditTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -345,6 +349,20 @@ public partial class MainWindow : Window
     private void OnSelectFreehandTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         _tool = ToolMode.FreehandTrace;
+        _dragging = false;
+        _dragTan = false;
+        _activeKnot = null;
+        _creating = false;
+        _freehandActive = false;
+        _freehandPoints.Clear();
+        _freehandSession = false;
+        UpdateToolMenuChecks();
+        RenderAll();
+    }
+
+    private void OnSelectDeletePointTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _tool = ToolMode.DeletePoint;
         _dragging = false;
         _dragTan = false;
         _activeKnot = null;
@@ -404,6 +422,37 @@ public partial class MainWindow : Window
             _freehandPoints.Add(p);
             _freehandSession = true;
             RenderAll();
+            return;
+        }
+
+        if (_tool == ToolMode.DeletePoint)
+        {
+            // hit test knots across all subpaths and delete on click
+            Spline.CP? hitKnotDel = null;
+            int hitSubDel = _activeSubpath;
+            for (int si = 0; si < _subpaths.Count; si++)
+            {
+                foreach (var k in _subpaths[si].Knots)
+                {
+                    if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+                    {
+                        hitKnotDel = k;
+                        hitSubDel = si;
+                        break;
+                    }
+                }
+                if (hitKnotDel != null) break;
+            }
+            if (hitKnotDel != null)
+            {
+                _activeSubpath = hitSubDel;
+                _subpaths[hitSubDel].Knots.Remove(hitKnotDel);
+                if (_subpaths[hitSubDel].Knots.Count < 3) _subpaths[hitSubDel].Closed = false;
+                _selection.Remove(hitKnotDel);
+                RenderAll();
+                return;
+            }
+            // No hit: do nothing in delete mode
             return;
         }
 
