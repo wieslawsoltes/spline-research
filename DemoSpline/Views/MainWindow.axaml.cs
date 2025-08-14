@@ -15,6 +15,7 @@ using Avalonia.Threading;
 using DemoSpline.Models;
 using System;
 using Avalonia.Media.TextFormatting;
+using Avalonia.VisualTree;
 
 namespace DemoSpline.Views;
 
@@ -42,7 +43,7 @@ public partial class MainWindow : Window
     }
     private readonly List<GlyphOverlay> _glyphs = new();
     private bool _showGrid = true;
-    private Point? _lastPointer;
+    private Point? _lastPointerContent;
     private bool _dragging;
     private Spline.CP? _activeKnot;
     private readonly HashSet<Spline.CP> _selection = new();
@@ -71,6 +72,8 @@ public partial class MainWindow : Window
     private Point? _pointerPos;
 	private bool _svgHover;
     private bool _useRawCubic;
+
+    // View transform state moved into PanZoomHost
 
     private enum ToolMode
     {
@@ -119,13 +122,10 @@ public partial class MainWindow : Window
         EditorCanvas.PointerPressed += OnPointerPressed;
         EditorCanvas.PointerMoved += OnPointerMoved;
         EditorCanvas.PointerReleased += OnPointerReleased;
-        EditorCanvas.PointerWheelChanged += OnPointerWheelChanged;
         EditorCanvas.PointerEntered += (_, ev) => { _pointerPos = ev.GetPosition(EditorCanvas); _svgHover = true; RenderAll(); };
         EditorCanvas.PointerExited += (_, __) => { _pointerPos = null; _svgHover = false; RenderAll(); };
-        // Re-render on size changes of any canvas layer
-        EditorCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
-        GridCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
-        GlyphCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
+        // Re-render on size changes of the viewport
+        Viewport.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => { RenderAll(); }));
         this.KeyDown += OnKeyDown;
         RenderAll();
     }
@@ -212,6 +212,7 @@ public partial class MainWindow : Window
         _freehandPoints.Clear();
         _freehandSession = false;
         _tool = ToolMode.EditSpline;
+        ZoomHost.ResetMatrix(); _lastPointerContent = null;
         UpdateToolMenuChecks();
         RenderAll();
     }
@@ -648,16 +649,42 @@ public partial class MainWindow : Window
         RenderAll();
     }
 
+    // Zoom menu handlers
+    private void OnZoomReset(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        ZoomHost.ResetMatrix();
+        RenderAll();
+    }
+
+    private void OnZoomIn(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        // Programmatic zoom-in via control API can be added; wheel zoom works by default
+        return;
+    }
+
+    private void OnZoomOut(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        // Programmatic zoom-out via control API can be added; wheel zoom works by default
+        return;
+    }
+
+    private void OnZoomFit(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        FitContentToView();
+    }
+
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        var p = e.GetPosition(EditorCanvas);
-        _lastPointer = p;
+        var pv = e.GetPosition(EditorCanvas);
+        var p = pv;
+        _pointerPos = pv;
+        _lastPointerContent = p;
         _dragTan = false;
         _shiftOnDrag = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+        var pp = e.GetCurrentPoint(EditorCanvas);
 
         if (_tool == ToolMode.FreehandTrace)
         {
-            var pp = e.GetCurrentPoint(EditorCanvas);
             // Right click finishes the freehand session
             if (pp.Properties.IsRightButtonPressed)
             {
@@ -684,11 +711,12 @@ public partial class MainWindow : Window
             // hit test knots across all subpaths and delete on click
             Spline.CP? hitKnotDel = null;
             int hitSubDel = _activeSubpath;
+            double tol = 6.0;
             for (int si = 0; si < _subpaths.Count; si++)
             {
                 foreach (var k in _subpaths[si].Knots)
                 {
-                    if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+                    if (Math.Abs(k.Pt.X - p.X) < tol && Math.Abs(k.Pt.Y - p.Y) < tol)
                     {
                         hitKnotDel = k;
                         hitSubDel = si;
@@ -710,6 +738,35 @@ public partial class MainWindow : Window
             return;
         }
 
+        // In EditSpline tool, right-click deletes a point under the cursor
+        if (_tool == ToolMode.EditSpline && pp.Properties.IsRightButtonPressed)
+        {
+            Spline.CP? hitKnotDel = null;
+            int hitSubDel = _activeSubpath;
+            for (int si = 0; si < _subpaths.Count; si++)
+            {
+                foreach (var k in _subpaths[si].Knots)
+                {
+                    if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+                    {
+                        hitKnotDel = k;
+                        hitSubDel = si;
+                        break;
+                    }
+                }
+                if (hitKnotDel != null) break;
+            }
+            if (hitKnotDel != null)
+            {
+                _activeSubpath = hitSubDel;
+                _subpaths[hitSubDel].Knots.Remove(hitKnotDel);
+                if (_subpaths[hitSubDel].Knots.Count < 3) _subpaths[hitSubDel].Closed = false;
+                _selection.Remove(hitKnotDel);
+                RenderAll();
+            }
+            return;
+        }
+
         if (_tool == ToolMode.GlyphEdit)
         {
             // Toggle selection or start dragging selected glyph
@@ -726,7 +783,7 @@ public partial class MainWindow : Window
                     // Select this glyph exclusively
                     foreach (var gg in _glyphs) gg.Selected = false;
                     g.Selected = true;
-                    _lastPointer = p;
+                    _lastPointerContent = p;
                     _dragging = true; // reuse dragging flag to move glyph in OnPointerMoved
                     RenderAll();
                     return;
@@ -755,11 +812,12 @@ public partial class MainWindow : Window
         // hit test knots across all subpaths
         Spline.CP? hitKnot = null;
         int hitSubpathIndex = _activeSubpath;
+        double tol2 = 6.0;
         for (int si = 0; si < _subpaths.Count; si++)
         {
             foreach (var k in _subpaths[si].Knots)
             {
-                if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+                if (Math.Abs(k.Pt.X - p.X) < tol2 && Math.Abs(k.Pt.Y - p.Y) < tol2)
                 {
                     hitKnot = k;
                     hitSubpathIndex = si;
@@ -818,7 +876,8 @@ public partial class MainWindow : Window
                     bestSub = si;
                 }
             }
-            if (bestSub >= 0 && best < 5)
+            double hitTol = 5.0;
+            if (bestSub >= 0 && best < hitTol)
             {
                 targetSubpath = bestSub;
                 insertIx = Math.Clamp(bestMark + 1, 0, _subpaths[targetSubpath].Knots.Count);
@@ -841,8 +900,10 @@ public partial class MainWindow : Window
 
     private void OnPointerMoved(object? sender, PointerEventArgs e)
     {
-        var p = e.GetPosition(EditorCanvas);
-        _pointerPos = p;
+        var pv = e.GetPosition(EditorCanvas);
+        _pointerPos = pv;
+        // coordinates are already in content space
+        var p = pv;
         if (_tool == ToolMode.FreehandTrace)
         {
             if (_freehandActive)
@@ -863,8 +924,9 @@ public partial class MainWindow : Window
             var gsel = _glyphs.FirstOrDefault(g => g.Selected);
             if (gsel != null && _dragging)
             {
-                double dx = p.X - (_lastPointer?.X ?? p.X);
-                double dy = p.Y - (_lastPointer?.Y ?? p.Y);
+                // Move glyph in content coords
+                double dx = p.X - (_lastPointerContent?.X ?? p.X);
+                double dy = p.Y - (_lastPointerContent?.Y ?? p.Y);
                 if (e.KeyModifiers.HasFlag(KeyModifiers.Shift))
                 {
                     var snapped = RoundToGrid(new Point(gsel.Ox + dx, gsel.Oy + dy));
@@ -876,7 +938,7 @@ public partial class MainWindow : Window
                     gsel.Ox += dx;
                     gsel.Oy += dy;
                 }
-                _lastPointer = p;
+                _lastPointerContent = p;
                 RenderAll();
             }
             return;
@@ -895,8 +957,8 @@ public partial class MainWindow : Window
         if (_dragging)
         {
             if (_selection.Count == 0) return;
-            double dx = p.X - (_lastPointer?.X ?? p.X);
-            double dy = p.Y - (_lastPointer?.Y ?? p.Y);
+            double dx = p.X - (_lastPointerContent?.X ?? p.X);
+            double dy = p.Y - (_lastPointerContent?.Y ?? p.Y);
             foreach (var k in _selection)
             {
                 if (e.KeyModifiers.HasFlag(KeyModifiers.Shift) && _selection.Count == 1)
@@ -909,13 +971,14 @@ public partial class MainWindow : Window
                     k.Pt = new Vec2(k.Pt.X + dx, k.Pt.Y + dy);
                 }
             }
-            _lastPointer = p;
+            _lastPointerContent = p;
             RenderAll();
         }
     }
 
     private void OnPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
+        // panning handled by ZoomHost
         if (_tool == ToolMode.FreehandTrace)
         {
             if (_freehandActive && _freehandPoints.Count > 2)
@@ -942,22 +1005,7 @@ public partial class MainWindow : Window
         _creating = false;
     }
 
-    private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
-    {
-        if (_tool != ToolMode.GlyphEdit) return;
-        var gsel = _glyphs.FirstOrDefault(g => g.Selected);
-        if (gsel == null) return;
-        // Zoom around pointer position
-        var p = e.GetPosition(EditorCanvas);
-        double factor = e.Delta.Y > 0 ? 1.1 : 1.0 / 1.1;
-        double newScale = Math.Clamp(gsel.Scale * factor, 0.05, 100);
-        factor = newScale / gsel.Scale;
-        // adjust offset to keep pointer anchored
-        gsel.Ox = p.X - factor * (p.X - gsel.Ox);
-        gsel.Oy = p.Y - factor * (p.Y - gsel.Oy);
-        gsel.Scale = newScale;
-        RenderAll();
-    }
+    // Wheel zoom handled by ZoomHost in XAML control
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
     {
@@ -987,6 +1035,8 @@ public partial class MainWindow : Window
         GridCanvas.Children.Clear();
         GlyphCanvas.Children.Clear();
         EditorCanvas.Children.Clear();
+
+        // Transform applied by ZoomHost
 
         if (_showGrid)
         {
@@ -1206,9 +1256,10 @@ public partial class MainWindow : Window
     {
         if (_pointerPos.HasValue)
         {
-            var pt = _pointerPos.Value;
-            if (pt.X >= 0 && pt.Y >= 0 && pt.X <= EditorCanvas.Bounds.Width && pt.Y <= EditorCanvas.Bounds.Height)
-                return pt;
+            // _pointerPos is in view space; check against view bounds, then convert to content
+            var viewPt = _pointerPos.Value;
+            if (viewPt.X >= 0 && viewPt.Y >= 0 && viewPt.X <= Viewport.Bounds.Width && viewPt.Y <= Viewport.Bounds.Height)
+                return ViewToContent(viewPt);
         }
         return null;
     }
@@ -1388,6 +1439,110 @@ public partial class MainWindow : Window
     private Point RoundToGrid(Point p, double g = 20)
     {
         return new Point(g * Math.Round(p.X / g), g * Math.Round(p.Y / g));
+    }
+
+    // ===== View transform helpers =====
+    private void ApplyViewTransform()
+    {
+        // Transform is handled by ZoomHost control
+    }
+
+    private Point ViewToContent(Point viewPoint)
+    {
+        // ZoomBorder does not expose conversion helpers; our content is drawn in content space
+        return viewPoint;
+    }
+
+    private Point ContentToView(Point contentPoint)
+    {
+        // Same as above
+        return contentPoint;
+    }
+
+    private void ZoomAroundContentPoint(Point contentAnchor, double factor)
+    {
+        // Not supported directly; wheel zoom handles user interaction
+        RenderAll();
+    }
+
+    private void ZoomAroundViewPoint(Point viewAnchor, double factor)
+    {
+        // Not supported directly; wheel zoom handles user interaction
+        RenderAll();
+    }
+
+    // Zoom to a view point and center that content point in the viewport after zoom
+    private void ZoomToViewPointAndCenter(Point viewAnchor, double factor)
+    {
+        // Optional: could implement centering via ZoomHost; keeping old API for menu usage
+        ZoomAroundViewPoint(viewAnchor, factor);
+    }
+
+    private void SanitizeTransform()
+    {
+        // No-op: transform validity enforced by ZoomHost
+    }
+
+    private void FitContentToView()
+    {
+        double vw = Math.Max(EditorCanvas.Bounds.Width, 1);
+        double vh = Math.Max(EditorCanvas.Bounds.Height, 1);
+        if (vw <= 1 || vh <= 1)
+        {
+            ZoomHost.ResetMatrix();
+            RenderAll();
+            return;
+        }
+
+        bool hasAny = false;
+        double minX = double.PositiveInfinity, minY = double.PositiveInfinity;
+        double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity;
+
+        // Include knots (content coordinates)
+        foreach (var sp in _subpaths)
+        {
+            foreach (var k in sp.Knots)
+            {
+                hasAny = true;
+                if (k.Pt.X < minX) minX = k.Pt.X;
+                if (k.Pt.Y < minY) minY = k.Pt.Y;
+                if (k.Pt.X > maxX) maxX = k.Pt.X;
+                if (k.Pt.Y > maxY) maxY = k.Pt.Y;
+            }
+        }
+        // Include glyphs (their geometry bounds with scale/offset)
+        foreach (var g in _glyphs)
+        {
+            var b = g.Geom.Bounds;
+            // transform rectangle corners by [s 0 0 s Ox Oy]
+            var c0 = new Point(g.Ox + g.Scale * b.X, g.Oy + g.Scale * b.Y);
+            var c1 = new Point(g.Ox + g.Scale * (b.X + b.Width), g.Oy + g.Scale * b.Y);
+            var c2 = new Point(g.Ox + g.Scale * (b.X + b.Width), g.Oy + g.Scale * (b.Y + b.Height));
+            var c3 = new Point(g.Ox + g.Scale * b.X, g.Oy + g.Scale * (b.Y + b.Height));
+            hasAny = true;
+            double gxmin = new[] { c0.X, c1.X, c2.X, c3.X }.Min();
+            double gxmax = new[] { c0.X, c1.X, c2.X, c3.X }.Max();
+            double gymin = new[] { c0.Y, c1.Y, c2.Y, c3.Y }.Min();
+            double gymax = new[] { c0.Y, c1.Y, c2.Y, c3.Y }.Max();
+            if (gxmin < minX) minX = gxmin;
+            if (gymin < minY) minY = gymin;
+            if (gxmax > maxX) maxX = gxmax;
+            if (gymax > maxY) maxY = gymax;
+        }
+
+        if (!hasAny || !double.IsFinite(minX) || !double.IsFinite(minY) || !double.IsFinite(maxX) || !double.IsFinite(maxY))
+        {
+            ZoomHost.ResetMatrix();
+            RenderAll();
+            return;
+        }
+
+        // Add small padding then call AutoFit on ZoomBorder
+        double pad = 20.0;
+        minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+        ZoomHost.AutoFit();
+        // ZoomBorder manages centering within AutoFit/Stretch modes
+        RenderAll();
     }
 
     private SubpathData EnsureActiveSubpath()
