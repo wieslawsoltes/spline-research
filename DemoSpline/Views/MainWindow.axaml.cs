@@ -31,7 +31,16 @@ public partial class MainWindow : Window
     private List<Spline.CP> _knots => EnsureActiveSubpath().Knots;
     private bool _isClosed { get => EnsureActiveSubpath().Closed; set => EnsureActiveSubpath().Closed = value; }
     private readonly List<BezierPath> _paths = new();
-    private readonly List<Geometry> _pendingGlyphs = new();
+    private sealed class GlyphOverlay
+    {
+        public required Geometry Geom { get; init; }
+        public double Scale { get; set; }
+        public double Ox { get; set; }
+        public double Oy { get; set; }
+        public bool Selected { get; set; }
+        public bool NeedsAutoFit { get; set; }
+    }
+    private readonly List<GlyphOverlay> _glyphs = new();
     private bool _showGrid = true;
     private Point? _lastPointer;
     private bool _dragging;
@@ -58,6 +67,7 @@ public partial class MainWindow : Window
     private MenuItem? _editToolMenuItem;
     private MenuItem? _freehandToolMenuItem;
     private MenuItem? _deletePointToolMenuItem;
+    private MenuItem? _glyphEditToolMenuItem;
     private Point? _pointerPos;
 	private bool _svgHover;
     private bool _useRawCubic;
@@ -66,7 +76,8 @@ public partial class MainWindow : Window
     {
         EditSpline,
         FreehandTrace,
-        DeletePoint
+        DeletePoint,
+        GlyphEdit
     }
 
     private ToolMode _tool = ToolMode.EditSpline;
@@ -95,6 +106,7 @@ public partial class MainWindow : Window
             _editToolMenuItem = this.FindControl<MenuItem>("EditToolMenu");
             _freehandToolMenuItem = this.FindControl<MenuItem>("FreehandToolMenu");
             _deletePointToolMenuItem = this.FindControl<MenuItem>("DeletePointToolMenu");
+            _glyphEditToolMenuItem = this.FindControl<MenuItem>("GlyphEditToolMenu");
             UpdateToolMenuChecks();
             RenderAll();
         };
@@ -107,6 +119,7 @@ public partial class MainWindow : Window
         EditorCanvas.PointerPressed += OnPointerPressed;
         EditorCanvas.PointerMoved += OnPointerMoved;
         EditorCanvas.PointerReleased += OnPointerReleased;
+        EditorCanvas.PointerWheelChanged += OnPointerWheelChanged;
         EditorCanvas.PointerEntered += (_, ev) => { _pointerPos = ev.GetPosition(EditorCanvas); _svgHover = true; RenderAll(); };
         EditorCanvas.PointerExited += (_, __) => { _pointerPos = null; _svgHover = false; RenderAll(); };
         // Re-render on size changes of any canvas layer
@@ -188,7 +201,7 @@ public partial class MainWindow : Window
     {
         _subpaths.Clear();
         _paths.Clear();
-        _pendingGlyphs.Clear();
+        _glyphs.Clear();
         _activeSubpath = 0;
         _selection.Clear();
         _activeKnot = null;
@@ -217,8 +230,35 @@ public partial class MainWindow : Window
 
     public void InsertGlyphGeometry(Geometry geom)
     {
-        // Rebuild overlays on render to avoid being cleared; store as field list
-        _pendingGlyphs.Add(geom);
+        // Initial placement to fit canvas with padding
+        double cw = GlyphCanvas.Bounds.Width;
+        double ch = GlyphCanvas.Bounds.Height;
+        var gb = geom.Bounds;
+        if (gb.Width <= 0 || gb.Height <= 0) return;
+        if (cw < 2 || ch < 2)
+        {
+            // Defer fit until canvas has size; place at origin-relative
+            double s0 = 1.0;
+            double ox0 = -gb.X;
+            double oy0 = -gb.Y;
+            _glyphs.Add(new GlyphOverlay { Geom = geom, Scale = s0, Ox = ox0, Oy = oy0, Selected = false, NeedsAutoFit = true });
+        }
+        else
+        {
+            // Center glyph bounds within canvas with padding, accounting for bounds origin and scale
+            double extraPad = 20.0;
+            double pad = extraPad + 0.5;
+            double innerW = Math.Max(cw - 2 * pad, 1);
+            double innerH = Math.Max(ch - 2 * pad, 1);
+            double sx = innerW / gb.Width;
+            double sy = innerH / gb.Height;
+            double s = Math.Min(sx, sy);
+            if (double.IsInfinity(s) || double.IsNaN(s) || s <= 0) s = 1.0;
+            // Empirical correction: bounds-origin-centered glyphs appear with center at top-left, shift by half extents
+            double ox = (cw - s * gb.Width) * 0.5 - s * gb.X + 0.5 * s * gb.Width;
+            double oy = (ch - s * gb.Height) * 0.5 - s * gb.Y + 0.5 * s * gb.Height;
+            _glyphs.Add(new GlyphOverlay { Geom = geom, Scale = s, Ox = ox, Oy = oy, Selected = false, NeedsAutoFit = false });
+        }
         RenderAll();
     }
 
@@ -229,7 +269,7 @@ public partial class MainWindow : Window
             return;
         var geom = new GlyphRun(glyphTypeface, fontSize, ReadOnlyMemory<char>.Empty, new ushort[] { (ushort)glyphIndex }).BuildGeometry();
         if (geom is null) return;
-        _pendingGlyphs.Add(geom);
+        InsertGlyphGeometry(geom);
         RenderAll();
     }
 
@@ -547,6 +587,11 @@ public partial class MainWindow : Window
         _dragTan = false;
         _activeKnot = null;
         _creating = false;
+        if (_tool == ToolMode.GlyphEdit)
+        {
+            // Stop glyph drag on release
+            _dragging = false;
+        }
         _freehandActive = false;
         _freehandPoints.Clear();
         _freehandSession = false;
@@ -564,6 +609,21 @@ public partial class MainWindow : Window
         _freehandActive = false;
         _freehandPoints.Clear();
         _freehandSession = false;
+        UpdateToolMenuChecks();
+        RenderAll();
+    }
+
+    private void OnSelectGlyphEditTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _tool = ToolMode.GlyphEdit;
+        _dragging = false;
+        _dragTan = false;
+        _activeKnot = null;
+        _creating = false;
+        _freehandActive = false;
+        _freehandPoints.Clear();
+        _freehandSession = false;
+        foreach (var g in _glyphs) g.Selected = false;
         UpdateToolMenuChecks();
         RenderAll();
     }
@@ -647,6 +707,34 @@ public partial class MainWindow : Window
                 return;
             }
             // No hit: do nothing in delete mode
+            return;
+        }
+
+        if (_tool == ToolMode.GlyphEdit)
+        {
+            // Toggle selection or start dragging selected glyph
+            // Hit test glyphs by inverse transform of their scale/translate
+            for (int gi = _glyphs.Count - 1; gi >= 0; gi--)
+            {
+                var g = _glyphs[gi];
+                var b = g.Geom.Bounds;
+                // inverse transform
+                double ix = (p.X - g.Ox) / g.Scale;
+                double iy = (p.Y - g.Oy) / g.Scale;
+                if (ix >= b.X && ix <= b.X + b.Width && iy >= b.Y && iy <= b.Y + b.Height)
+                {
+                    // Select this glyph exclusively
+                    foreach (var gg in _glyphs) gg.Selected = false;
+                    g.Selected = true;
+                    _lastPointer = p;
+                    _dragging = true; // reuse dragging flag to move glyph in OnPointerMoved
+                    RenderAll();
+                    return;
+                }
+            }
+            // Clicked empty: clear glyph selection
+            foreach (var gg in _glyphs) gg.Selected = false;
+            RenderAll();
             return;
         }
 
@@ -770,6 +858,29 @@ public partial class MainWindow : Window
             RenderAll();
             return;
         }
+        if (_tool == ToolMode.GlyphEdit)
+        {
+            var gsel = _glyphs.FirstOrDefault(g => g.Selected);
+            if (gsel != null && _dragging)
+            {
+                double dx = p.X - (_lastPointer?.X ?? p.X);
+                double dy = p.Y - (_lastPointer?.Y ?? p.Y);
+                if (e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+                {
+                    var snapped = RoundToGrid(new Point(gsel.Ox + dx, gsel.Oy + dy));
+                    gsel.Ox = snapped.X;
+                    gsel.Oy = snapped.Y;
+                }
+                else
+                {
+                    gsel.Ox += dx;
+                    gsel.Oy += dy;
+                }
+                _lastPointer = p;
+                RenderAll();
+            }
+            return;
+        }
         if (_creating)
         {
             // Toggle between corner and smooth while creating based on radius from initial click
@@ -829,6 +940,23 @@ public partial class MainWindow : Window
         _dragTan = false;
         _activeKnot = null;
         _creating = false;
+    }
+
+    private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    {
+        if (_tool != ToolMode.GlyphEdit) return;
+        var gsel = _glyphs.FirstOrDefault(g => g.Selected);
+        if (gsel == null) return;
+        // Zoom around pointer position
+        var p = e.GetPosition(EditorCanvas);
+        double factor = e.Delta.Y > 0 ? 1.1 : 1.0 / 1.1;
+        double newScale = Math.Clamp(gsel.Scale * factor, 0.05, 100);
+        factor = newScale / gsel.Scale;
+        // adjust offset to keep pointer anchored
+        gsel.Ox = p.X - factor * (p.X - gsel.Ox);
+        gsel.Oy = p.Y - factor * (p.Y - gsel.Oy);
+        gsel.Scale = newScale;
+        RenderAll();
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
@@ -920,53 +1048,52 @@ public partial class MainWindow : Window
 
         RenderSelection();
 
-        // Draw glyph overlays using a Viewbox to handle uniform scale and centering
-        if (_pendingGlyphs.Count > 0)
+        // Draw glyph overlays directly on canvas with explicit scale/translate (editable)
+        if (_glyphs.Count > 0)
         {
-            double cw = Math.Max(GlyphCanvas.Bounds.Width, 1);
-            double ch = Math.Max(GlyphCanvas.Bounds.Height, 1);
-            foreach (var geom in _pendingGlyphs)
+            double cw = GlyphCanvas.Bounds.Width;
+            double ch = GlyphCanvas.Bounds.Height;
+            for (int gi = 0; gi < _glyphs.Count; gi++)
             {
-                var gb = geom.Bounds;
-                if (gb.Height <= 0 || gb.Width <= 0) continue;
-                double stroke = 1.0;
-                double extraPad = 20.0; // visual padding around fitted glyph
-                double pad = extraPad + stroke * 0.5;
-                double innerW = Math.Max(cw - 2 * pad, 1);
-                double innerH = Math.Max(ch - 2 * pad, 1);
-
-                var viewbox = new Viewbox
+                var g = _glyphs[gi];
+                var gb = g.Geom.Bounds;
+                if (g.NeedsAutoFit && cw >= 2 && ch >= 2 && gb.Width > 0 && gb.Height > 0)
                 {
-                    Width = innerW,
-                    Height = innerH,
-                    Stretch = Stretch.Uniform,
-                    StretchDirection = StretchDirection.Both,
-                    IsHitTestVisible = false
-                };
-                Canvas.SetLeft(viewbox, pad);
-                Canvas.SetTop(viewbox, pad);
-
-                double contentPad = 1.5; // pad in geometry units to avoid stroke clipping inside host
-                var host = new Canvas
-                {
-                    Width = gb.Width + 2 * contentPad,
-                    Height = gb.Height + 2 * contentPad
-                };
-
+                    double sx = cw / gb.Width;
+                    double sy = ch / gb.Height;
+                    double s = Math.Min(sx, sy);
+                    if (double.IsInfinity(s) || double.IsNaN(s) || s <= 0) s = 1.0;
+                    double ox = (cw - s * gb.Width) * 0.5 - s * gb.X + 0.5 * s * gb.Width;
+                    double oy = (ch - s * gb.Height) * 0.5 - s * gb.Y + 0.5 * s * gb.Height;
+                    g.Scale = s; g.Ox = ox; g.Oy = oy; g.NeedsAutoFit = false;
+                }
                 var path = new Avalonia.Controls.Shapes.Path
                 {
-                    Data = geom,
-                    Stroke = Brushes.LightSlateGray,
-                    StrokeThickness = stroke,
+                    Data = g.Geom,
+                    Stroke = g.Selected ? Brushes.DeepSkyBlue : Brushes.LightSlateGray,
+                    StrokeThickness = g.Selected ? 1.5 : 1.0,
                     Fill = null,
                     IsHitTestVisible = false,
                     Opacity = 0.6,
-                    RenderTransform = new MatrixTransform(new Matrix(1, 0, 0, 1, -gb.X + contentPad, -gb.Y + contentPad))
+                    RenderTransform = new MatrixTransform(new Matrix(g.Scale, 0, 0, g.Scale, g.Ox, g.Oy))
                 };
-
-                host.Children.Add(path);
-                viewbox.Child = host;
-                GlyphCanvas.Children.Add(viewbox);
+                GlyphCanvas.Children.Add(path);
+                if (g.Selected)
+                {
+                    // Draw bounds overlay using the same transform as the glyph for exact alignment
+                    var rectGeo = new RectangleGeometry(new Rect(gb.X, gb.Y, gb.Width, gb.Height));
+                    var rectPath = new Avalonia.Controls.Shapes.Path
+                    {
+                        Data = rectGeo,
+                        Stroke = Brushes.DeepSkyBlue,
+                        StrokeThickness = 1,
+                        StrokeDashArray = new Avalonia.Collections.AvaloniaList<double> { 4, 4 },
+                        Fill = null,
+                        IsHitTestVisible = false,
+                        RenderTransform = new MatrixTransform(new Matrix(g.Scale, 0, 0, g.Scale, g.Ox, g.Oy))
+                    };
+                    GlyphCanvas.Children.Add(rectPath);
+                }
             }
         }
 

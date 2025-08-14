@@ -34,6 +34,7 @@
                 <MenuItem Header="Delete Point Tool" Click="OnSelectDeletePointTool" x:Name="DeletePointToolMenu"/>
                 <MenuItem Header="Open Tuner" Click="OnOpenTuner"/>
                 <MenuItem Header="Insert Glyph..." Click="OnOpenGlyphPicker"/>
+                <MenuItem Header="Edit Glyphs" Click="OnSelectGlyphEditTool" x:Name="GlyphEditToolMenu"/>
                 <MenuItem Header="Use raw cubic (no curvature adjust)" Click="OnToggleRawCubic" x:Name="RawCubicMenu"/>
                 <MenuItem Header="Reduce Knots" Click="OnReduceKnots"/>
                 <MenuItem Header="Fair Curvature..." Click="OnFairCurvature"/>
