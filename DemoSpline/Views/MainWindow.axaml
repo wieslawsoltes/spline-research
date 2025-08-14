@@ -18,6 +18,7 @@
     <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
         <Menu>
             <MenuItem Header="File">
+                <MenuItem Header="New" Click="OnNewDrawing"/>
                 <MenuItem Header="Load from JSON" Click="OnLoadJson"/>
                 <MenuItem Header="Save to JSON" Click="OnSaveJson"/>
             </MenuItem>

@@ -19,9 +19,17 @@ namespace DemoSpline.Views;
 
 public partial class MainWindow : Window
 {
-    private readonly List<Spline.CP> _knots = new();
-    private bool _isClosed = false;
-    private BezierPath _bez = new();
+    private sealed class SubpathData
+    {
+        public readonly List<Spline.CP> Knots = new();
+        public bool Closed;
+    }
+
+    private readonly List<SubpathData> _subpaths = new();
+    private int _activeSubpath = 0;
+    private List<Spline.CP> _knots => EnsureActiveSubpath().Knots;
+    private bool _isClosed { get => EnsureActiveSubpath().Closed; set => EnsureActiveSubpath().Closed = value; }
+    private readonly List<BezierPath> _paths = new();
     private bool _showGrid = true;
     private Point? _lastPointer;
     private bool _dragging;
@@ -62,6 +70,7 @@ public partial class MainWindow : Window
     // Freehand trace state
     private bool _freehandActive;
     private readonly List<Point> _freehandPoints = new();
+    private bool _freehandSession;
 
     public MainWindow()
     {
@@ -167,6 +176,24 @@ public partial class MainWindow : Window
         wnd.Show(this);
     }
 
+    private void OnNewDrawing(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _subpaths.Clear();
+        _paths.Clear();
+        _activeSubpath = 0;
+        _selection.Clear();
+        _activeKnot = null;
+        _dragging = false;
+        _dragTan = false;
+        _creating = false;
+        _freehandActive = false;
+        _freehandPoints.Clear();
+        _freehandSession = false;
+        _tool = ToolMode.EditSpline;
+        UpdateToolMenuChecks();
+        RenderAll();
+    }
+
     private void OnOpenHelp(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         var wnd = new HelpWindow();
@@ -182,7 +209,7 @@ public partial class MainWindow : Window
 
     private void OnReduceKnots(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (_knots.Count <= 2) return;
+        if (_subpaths.All(sp => sp.Knots.Count <= 2)) return;
         // Ask user for tolerance (in pixels)
         _ = Dispatcher.UIThread.InvokeAsync(async () =>
         {
@@ -208,66 +235,66 @@ public partial class MainWindow : Window
             }
             catch { }
 
-            ReduceKnotsByTolerance(tol);
+            ReduceKnotsByToleranceAll(tol);
             RenderAll();
         });
     }
 
-    private void ReduceKnotsByTolerance(double tolerance)
+    private void ReduceKnotsByToleranceAll(double tolerance)
     {
-        if (_knots.Count <= 2) return;
-        // Greedy removal: try removing each non-end knot if error <= tolerance
-        bool changed;
-        int guard = 0;
-        do
+        foreach (var sp in _subpaths)
         {
-            changed = false;
-            guard++;
-            if (guard > 1000) break;
-
-            for (int i = 1; i < _knots.Count - 1; i++)
+            if (sp.Knots.Count <= 2) continue;
+            bool changed;
+            int guard = 0;
+            do
             {
-                var candidate = _knots[i];
-                // Try removing
-                var backup = candidate;
-                _knots.RemoveAt(i);
+                changed = false;
+                guard++;
+                if (guard > 1000) break;
 
-                // Solve and measure error of original curve samples against new curve
-                var spline = new Spline(new List<Spline.CP>(_knots), _isClosed);
-                spline.Solve();
-                spline.ComputeCurvatureBlending();
-                var path = spline.Render(_useRawCubic);
-
-                double maxErr = 0;
-                // Sample along the polyline that the knots represent (use linear interpolation of current knots)
-                for (int k = 0; k < _knots.Count - 1; k++)
+                for (int i = 1; i < sp.Knots.Count - 1; i++)
                 {
-                    var a = _knots[k].Pt;
-                    var b = _knots[k + 1].Pt;
-                    int n = 8;
-                    for (int s = 0; s <= n; s++)
+                    var backup = sp.Knots[i];
+                    sp.Knots.RemoveAt(i);
+
+                    var spline = new Spline(new List<Spline.CP>(sp.Knots), sp.Closed);
+                    spline.Solve();
+                    spline.ComputeCurvatureBlending();
+                    var path = spline.Render(_useRawCubic);
+
+                    double maxErr = 0;
+                    for (int k = 0; k < sp.Knots.Count - 1; k++)
                     {
-                        double t = (double)s / n;
-                        double x = a.X + t * (b.X - a.X);
-                        double y = a.Y + t * (b.Y - a.Y);
-                        var ht = path.HitTest(x, y);
-                        if (ht.BestDist > maxErr) maxErr = ht.BestDist;
+                        var a = sp.Knots[k].Pt;
+                        var b = sp.Knots[k + 1].Pt;
+                        int n = 8;
+                        for (int s = 0; s <= n; s++)
+                        {
+                            double tt = (double)s / n;
+                            double x = a.X + tt * (b.X - a.X);
+                            double y = a.Y + tt * (b.Y - a.Y);
+                            var ht = path.HitTest(x, y);
+                            if (ht.BestDist > maxErr) maxErr = ht.BestDist;
+                            if (maxErr > tolerance) break;
+                        }
                         if (maxErr > tolerance) break;
                     }
-                    if (maxErr > tolerance) break;
-                }
 
-                if (maxErr <= tolerance)
-                {
-                    changed = true;
-                    i--; // recheck same index after removal shift
+                    if (maxErr <= tolerance)
+                    {
+                        changed = true;
+                        i--;
+                    }
+                    else
+                    {
+                        sp.Knots.Insert(i, backup);
+                    }
                 }
-                else
-                {
-                    _knots.Insert(i, backup); // restore
-                }
-            }
-        } while (changed);
+            } while (changed);
+
+            if (sp.Knots.Count < 3) sp.Closed = false;
+        }
     }
 
     private void UpdateToolMenuChecks()
@@ -294,6 +321,7 @@ public partial class MainWindow : Window
         _creating = false;
         _freehandActive = false;
         _freehandPoints.Clear();
+        _freehandSession = false;
         UpdateToolMenuChecks();
         RenderAll();
     }
@@ -302,15 +330,18 @@ public partial class MainWindow : Window
     private void OnDeletePoint(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         // Mirror menu-delete behavior from demo
-        for (int i = 0; i < _knots.Count; i++)
+        foreach (var sp in _subpaths)
         {
-            if (_selection.Contains(_knots[i]))
+            for (int i = 0; i < sp.Knots.Count; i++)
             {
-                _knots.RemoveAt(i);
-                i--;
+                if (_selection.Contains(sp.Knots[i]))
+                {
+                    sp.Knots.RemoveAt(i);
+                    i--;
+                }
             }
+            if (sp.Knots.Count < 3) sp.Closed = false;
         }
-        if (_knots.Count < 3) _isClosed = false;
         _selection.Clear();
         RenderAll();
     }
@@ -324,9 +355,24 @@ public partial class MainWindow : Window
 
         if (_tool == ToolMode.FreehandTrace)
         {
+            var pp = e.GetCurrentPoint(EditorCanvas);
+            // Right click finishes the freehand session
+            if (pp.Properties.IsRightButtonPressed)
+            {
+                _freehandActive = false;
+                _freehandPoints.Clear();
+                _freehandSession = false;
+                _tool = ToolMode.EditSpline;
+                UpdateToolMenuChecks();
+                RenderAll();
+                return;
+            }
+
+            // Left press starts a new figure stroke
             _freehandActive = true;
             _freehandPoints.Clear();
             _freehandPoints.Add(p);
+            _freehandSession = true;
             RenderAll();
             return;
         }
@@ -345,19 +391,27 @@ public partial class MainWindow : Window
             return;
         }
 
-        // hit test knots
+        // hit test knots across all subpaths
         Spline.CP? hitKnot = null;
-        foreach (var k in _knots)
+        int hitSubpathIndex = _activeSubpath;
+        for (int si = 0; si < _subpaths.Count; si++)
         {
-            if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+            foreach (var k in _subpaths[si].Knots)
             {
-                hitKnot = k;
-                break;
+                if (Math.Abs(k.Pt.X - p.X) < 6 && Math.Abs(k.Pt.Y - p.Y) < 6)
+                {
+                    hitKnot = k;
+                    hitSubpathIndex = si;
+                    break;
+                }
             }
+            if (hitKnot != null) break;
         }
 
         if (hitKnot != null)
         {
+            // switch active subpath if needed
+            _activeSubpath = hitSubpathIndex;
             if (e.ClickCount > 1)
             {
                 // Toggle ty
@@ -386,19 +440,34 @@ public partial class MainWindow : Window
 
         // Empty space: possibly subdivide segment by hit-testing bezier path
         int insertIx = _knots.Count;
+        int targetSubpath = _activeSubpath;
         bool makeSmooth = e.KeyModifiers.HasFlag(KeyModifiers.Alt);
-        if (_bez != null)
+        if (_paths.Count > 0)
         {
-            var ht = _bez.HitTest(p.X, p.Y);
-            if (ht.BestDist < 5 && ht.BestMark.HasValue)
+            double best = double.MaxValue;
+            int bestMark = -1;
+            int bestSub = -1;
+            for (int si = 0; si < _paths.Count; si++)
             {
-                insertIx = ht.BestMark.Value + 1;
+                var ht = _paths[si].HitTest(p.X, p.Y);
+                if (ht.BestDist < best && ht.BestMark.HasValue)
+                {
+                    best = ht.BestDist;
+                    bestMark = ht.BestMark.Value;
+                    bestSub = si;
+                }
+            }
+            if (bestSub >= 0 && best < 5)
+            {
+                targetSubpath = bestSub;
+                insertIx = Math.Clamp(bestMark + 1, 0, _subpaths[targetSubpath].Knots.Count);
                 makeSmooth = true;
+                _activeSubpath = targetSubpath;
             }
         }
         var newKnot = new Spline.CP(new Vec2(p.X, p.Y), makeSmooth ? "smooth" : "corner", null, null);
-        if (insertIx >= 0 && insertIx <= _knots.Count) _knots.Insert(insertIx, newKnot);
-        else _knots.Add(newKnot);
+        if (insertIx >= 0 && insertIx <= _subpaths[targetSubpath].Knots.Count) _subpaths[targetSubpath].Knots.Insert(insertIx, newKnot);
+        else _subpaths[targetSubpath].Knots.Add(newKnot);
         _selection.Clear();
         _selection.Add(newKnot);
         _activeKnot = newKnot;
@@ -468,7 +537,14 @@ public partial class MainWindow : Window
             if (_freehandActive && _freehandPoints.Count > 2)
             {
                 // Process freehand polyline into spline knots
-                ProcessFreehandPolyline();
+                var created = ProcessFreehandPolyline();
+                if (created != null)
+                {
+                    // append as a new subpath
+                    _subpaths.Add(new SubpathData { Closed = false });
+                    _subpaths[^1].Knots.AddRange(created);
+                    _activeSubpath = _subpaths.Count - 1;
+                }
             }
             _freehandActive = false;
             _freehandPoints.Clear();
@@ -486,15 +562,18 @@ public partial class MainWindow : Window
     {
         if (e.Key == Key.Delete || e.Key == Key.Back)
         {
-            for (int i = 0; i < _knots.Count; i++)
+            foreach (var sp in _subpaths)
             {
-                if (_selection.Contains(_knots[i]))
+                for (int i = 0; i < sp.Knots.Count; i++)
                 {
-                    _knots.RemoveAt(i);
-                    i--;
+                    if (_selection.Contains(sp.Knots[i]))
+                    {
+                        sp.Knots.RemoveAt(i);
+                        i--;
+                    }
                 }
+                if (sp.Knots.Count < 3) sp.Closed = false;
             }
-            if (_knots.Count < 3) _isClosed = false;
             _selection.Clear();
             RenderAll();
             e.Handled = true;
@@ -524,15 +603,18 @@ public partial class MainWindow : Window
             }
         }
 
-        if (_knots.Count > 0)
+        _paths.Clear();
+        for (int si = 0; si < _subpaths.Count; si++)
         {
-            // Solve spline and render
-            var cps = new List<Spline.CP>(_knots);
-            var spline = new Spline(cps, _isClosed);
+            var nks = _subpaths[si].Knots;
+            if (nks.Count == 0) continue;
+            var cps = new List<Spline.CP>(nks);
+            var spline = new Spline(cps, _subpaths[si].Closed);
             spline.Solve();
             spline.ComputeCurvatureBlending();
-            _bez = spline.Render(_useRawCubic);
-            var pathStr = _bez.ToSvgPath();
+            var bz = spline.Render(_useRawCubic);
+            _paths.Add(bz);
+            var pathStr = bz.ToSvgPath();
             if (!string.IsNullOrWhiteSpace(pathStr))
             {
                 var path = new Avalonia.Controls.Shapes.Path
@@ -563,14 +645,19 @@ public partial class MainWindow : Window
         RenderSelection();
 
         // Hover-to-add indicator near curve
-        if (EditorCanvas.IsPointerOver && _svgHover && _bez != null)
+        if (EditorCanvas.IsPointerOver && _svgHover && _paths.Count > 0)
         {
             var pos = this.GetPositionInCanvas();
             if (pos.HasValue)
             {
                 var local = pos.Value;
-                var ht = _bez.HitTest(local.X, local.Y);
-                if (ht.BestDist < 5)
+                double best = double.MaxValue;
+                foreach (var bz in _paths)
+                {
+                    var ht = bz.HitTest(local.X, local.Y);
+                    if (ht.BestDist < best) best = ht.BestDist;
+                }
+                if (best < 5)
                 {
                     var circ = new Ellipse { Width = 6, Height = 6, Stroke = Brushes.Black, StrokeThickness = 1, Fill = new SolidColorBrush(Color.FromArgb(40, 0, 0, 0)), IsHitTestVisible = false };
                     Canvas.SetLeft(circ, local.X - 3);
@@ -581,7 +668,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ProcessFreehandPolyline()
+    private List<Spline.CP>? ProcessFreehandPolyline()
     {
         // Parameters can later be exposed via UI
         double simplifyTolerance = 2.0; // pixels
@@ -592,7 +679,7 @@ public partial class MainWindow : Window
 
         // 1) Simplify with RDP
         var simplified = PolylineUtils.RamerDouglasPeucker(_freehandPoints, simplifyTolerance);
-        if (simplified.Count < 2) return;
+        if (simplified.Count < 2) return null;
 
         // 2) Detect corners
         var corners = PolylineUtils.DetectCorners(simplified, cornerAngleThresholdDeg * Math.PI / 180.0);
@@ -623,18 +710,17 @@ public partial class MainWindow : Window
         }
 
         // Clamp to at least two knots
-        if (newKnots.Count < 2) return;
+        if (newKnots.Count < 2) return null;
 
         // 4) Optional refinement by max deviation (coarse):
         //    evaluate current spline and insert extra knots at max-error locations
         for (int iter = 0; iter < maxIterations; iter++)
         {
             // Assign and solve current knots
-            _knots.Clear();
-            _knots.AddRange(newKnots);
-            _isClosed = false;
+            // Use a local spline for refinement (do not mutate current state)
+            var tempKnots = new List<Spline.CP>(newKnots.Select(k => new Spline.CP(new Vec2(k.Pt.X, k.Pt.Y), k.Ty, k.LTh, k.RTh)));
 
-            var spline = new Spline(new List<Spline.CP>(_knots), _isClosed);
+            var spline = new Spline(tempKnots, false);
             spline.Solve();
             spline.ComputeCurvatureBlending();
             var path = spline.Render(_useRawCubic);
@@ -660,10 +746,7 @@ public partial class MainWindow : Window
             if (ht2.BestMark.HasValue) insertIx = Math.Clamp(ht2.BestMark.Value + 1, 1, newKnots.Count);
             newKnots.Insert(insertIx, new Spline.CP(new Vec2(worstPt.Value.X, worstPt.Value.Y), "smooth", null, null));
         }
-
-        _knots.Clear();
-        _knots.AddRange(newKnots);
-        _isClosed = false;
+        return newKnots;
     }
 
     private Point? GetPositionInCanvas()
@@ -685,9 +768,11 @@ public partial class MainWindow : Window
 
     private void RenderSelection()
     {
-        foreach (var k in _knots)
+        foreach (var sp in _subpaths)
         {
-            bool isSelected = _selection.Contains(k);
+            foreach (var k in sp.Knots)
+            {
+                bool isSelected = _selection.Contains(k);
             Shape handleShape;
             if (k.Ty == "corner")
             {
@@ -818,6 +903,7 @@ public partial class MainWindow : Window
                     EditorCanvas.Children.Add(circ);
                 }
             }
+            }
         }
     }
 
@@ -851,6 +937,17 @@ public partial class MainWindow : Window
         return new Point(g * Math.Round(p.X / g), g * Math.Round(p.Y / g));
     }
 
+    private SubpathData EnsureActiveSubpath()
+    {
+        if (_subpaths.Count == 0)
+        {
+            _subpaths.Add(new SubpathData { Closed = false });
+            _activeSubpath = 0;
+        }
+        if (_activeSubpath < 0 || _activeSubpath >= _subpaths.Count) _activeSubpath = 0;
+        return _subpaths[_activeSubpath];
+    }
+
     private async Task MessageBox(string message)
     {
         var dlg = new Window
@@ -878,35 +975,40 @@ public partial class MainWindow : Window
     private string Serialize()
     {
         static double R(double x, double adj) => Math.Round(x * adj) / adj;
-        var pts = new List<Dictionary<string, object?>>();
-        foreach (var k in _knots)
+        var subpaths = new List<object?>();
+        for (int si = 0; si < _subpaths.Count; si++)
         {
-            var pt = new Dictionary<string, object?>
+            var pts = new List<Dictionary<string, object?>>();
+            foreach (var k in _subpaths[si].Knots)
             {
-                ["x"] = R(k.Pt.X, 100),
-                ["y"] = R(k.Pt.Y, 100)
+                var pt = new Dictionary<string, object?>
+                {
+                    ["x"] = R(k.Pt.X, 100),
+                    ["y"] = R(k.Pt.Y, 100)
+                };
+                // Match demo: c=1 means smooth; c=0 means corner
+                pt["c"] = k.Ty == "smooth" ? 1 : 0;
+                if (k.Ty == "smooth")
+                {
+                    if (k.LTh != null) pt["t"] = R(k.LTh.Value, 1000);
+                }
+                else
+                {
+                    if (k.LTh != null) pt["l"] = R(k.LTh.Value, 1000);
+                    if (k.RTh != null) pt["r"] = R(k.RTh.Value, 1000);
+                }
+                pts.Add(pt);
+            }
+            var sp = new Dictionary<string, object?>
+            {
+                ["closed"] = _subpaths[si].Closed,
+                ["pts"] = pts
             };
-            // Match demo: c=1 means smooth; c=0 means corner
-            pt["c"] = k.Ty == "smooth" ? 1 : 0;
-            if (k.Ty == "smooth")
-            {
-                if (k.LTh != null) pt["t"] = R(k.LTh.Value, 1000);
-            }
-            else
-            {
-                if (k.LTh != null) pt["l"] = R(k.LTh.Value, 1000);
-                if (k.RTh != null) pt["r"] = R(k.RTh.Value, 1000);
-            }
-            pts.Add(pt);
+            subpaths.Add(sp);
         }
-        var sp = new Dictionary<string, object?>
-        {
-            ["closed"] = _isClosed,
-            ["pts"] = pts
-        };
         var result = new Dictionary<string, object?>
         {
-            ["subpaths"] = new[] { sp }
+            ["subpaths"] = subpaths
         };
         return JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
     }
@@ -915,33 +1017,37 @@ public partial class MainWindow : Window
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
-        var sp = root.GetProperty("subpaths")[0];
-        bool closed = sp.GetProperty("closed").GetBoolean();
-        var knots = new List<Spline.CP>();
-        foreach (var pt in sp.GetProperty("pts").EnumerateArray())
+        _subpaths.Clear();
+        var sps = root.GetProperty("subpaths");
+        foreach (var sp in sps.EnumerateArray())
         {
-            string ty = pt.GetProperty("c").GetInt32() != 0 ? "smooth" : "corner";
-            double x = pt.GetProperty("x").GetDouble();
-            double y = pt.GetProperty("y").GetDouble();
-            var knot = new Spline.CP(new Vec2(x, y), ty, null, null);
-            if (ty == "smooth")
+            bool closed = sp.GetProperty("closed").GetBoolean();
+            var knots = new List<Spline.CP>();
+            foreach (var pt in sp.GetProperty("pts").EnumerateArray())
             {
-                if (pt.TryGetProperty("t", out var tprop))
+                string ty = pt.GetProperty("c").GetInt32() != 0 ? "smooth" : "corner";
+                double x = pt.GetProperty("x").GetDouble();
+                double y = pt.GetProperty("y").GetDouble();
+                var knot = new Spline.CP(new Vec2(x, y), ty, null, null);
+                if (ty == "smooth")
                 {
-                    knot.LTh = tprop.GetDouble();
-                    knot.RTh = knot.LTh;
+                    if (pt.TryGetProperty("t", out var tprop))
+                    {
+                        knot.LTh = tprop.GetDouble();
+                        knot.RTh = knot.LTh;
+                    }
                 }
+                else
+                {
+                    if (pt.TryGetProperty("l", out var lprop)) knot.LTh = lprop.GetDouble();
+                    if (pt.TryGetProperty("r", out var rprop)) knot.RTh = rprop.GetDouble();
+                }
+                knots.Add(knot);
             }
-            else
-            {
-                if (pt.TryGetProperty("l", out var lprop)) knot.LTh = lprop.GetDouble();
-                if (pt.TryGetProperty("r", out var rprop)) knot.RTh = rprop.GetDouble();
-            }
-            knots.Add(knot);
+            _subpaths.Add(new SubpathData { Closed = closed });
+            _subpaths[^1].Knots.AddRange(knots);
         }
-        _knots.Clear();
-        _knots.AddRange(knots);
-        _isClosed = closed;
+        _activeSubpath = _subpaths.Count > 0 ? 0 : -1;
         _selection.Clear();
         RenderAll();
     }
