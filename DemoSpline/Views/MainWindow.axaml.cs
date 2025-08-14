@@ -646,6 +646,10 @@ public partial class MainWindow : Window
             if (sp.Knots.Count < 3) sp.Closed = false;
         }
         _selection.Clear();
+        // Clear all state variables that might reference deleted knots
+        _activeKnot = null;
+        _dragging = false;
+        _dragTan = false;
         RenderAll();
     }
 
@@ -731,6 +735,13 @@ public partial class MainWindow : Window
                 _subpaths[hitSubDel].Knots.Remove(hitKnotDel);
                 if (_subpaths[hitSubDel].Knots.Count < 3) _subpaths[hitSubDel].Closed = false;
                 _selection.Remove(hitKnotDel);
+                // Clear stale references that might point to the deleted knot
+                if (_activeKnot == hitKnotDel)
+                {
+                    _activeKnot = null;
+                    _dragging = false;
+                    _dragTan = false;
+                }
                 RenderAll();
                 return;
             }
@@ -762,6 +773,13 @@ public partial class MainWindow : Window
                 _subpaths[hitSubDel].Knots.Remove(hitKnotDel);
                 if (_subpaths[hitSubDel].Knots.Count < 3) _subpaths[hitSubDel].Closed = false;
                 _selection.Remove(hitKnotDel);
+                // Clear stale references that might point to the deleted knot
+                if (_activeKnot == hitKnotDel)
+                {
+                    _activeKnot = null;
+                    _dragging = false;
+                    _dragTan = false;
+                }
                 RenderAll();
             }
             return;
@@ -1024,6 +1042,10 @@ public partial class MainWindow : Window
                 if (sp.Knots.Count < 3) sp.Closed = false;
             }
             _selection.Clear();
+            // Clear all state variables that might reference deleted knots
+            _activeKnot = null;
+            _dragging = false;
+            _dragTan = false;
             RenderAll();
             e.Handled = true;
         }
