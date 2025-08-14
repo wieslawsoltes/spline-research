@@ -677,7 +677,7 @@ public partial class MainWindow : Window
 
         RenderSelection();
 
-        // Draw glyph overlays (scaled to 80% of glyph canvas height and centered) on glyph layer
+        // Draw glyph overlays using a Viewbox to handle uniform scale and centering
         if (_pendingGlyphs.Count > 0)
         {
             double cw = Math.Max(GlyphCanvas.Bounds.Width, 1);
@@ -686,24 +686,44 @@ public partial class MainWindow : Window
             {
                 var gb = geom.Bounds;
                 if (gb.Height <= 0 || gb.Width <= 0) continue;
-                double scale = 0.8 * ch / gb.Height;
-                if (!double.IsFinite(scale) || scale <= 0) scale = 1;
-                double targetW = gb.Width * scale;
-                double targetH = gb.Height * scale;
-                double tx = (cw - targetW) * 0.5 - gb.X * scale;
-                double ty = (ch - targetH) * 0.5 - gb.Y * scale;
-                var m = new Matrix(scale, 0, 0, scale, tx, ty);
+                double stroke = 1.0;
+                double extraPad = 20.0; // visual padding around fitted glyph
+                double pad = extraPad + stroke * 0.5;
+                double innerW = Math.Max(cw - 2 * pad, 1);
+                double innerH = Math.Max(ch - 2 * pad, 1);
+
+                var viewbox = new Viewbox
+                {
+                    Width = innerW,
+                    Height = innerH,
+                    Stretch = Stretch.Uniform,
+                    StretchDirection = StretchDirection.Both,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(viewbox, pad);
+                Canvas.SetTop(viewbox, pad);
+
+                double contentPad = 1.5; // pad in geometry units to avoid stroke clipping inside host
+                var host = new Canvas
+                {
+                    Width = gb.Width + 2 * contentPad,
+                    Height = gb.Height + 2 * contentPad
+                };
+
                 var path = new Avalonia.Controls.Shapes.Path
                 {
                     Data = geom,
                     Stroke = Brushes.LightSlateGray,
-                    StrokeThickness = 1,
+                    StrokeThickness = stroke,
                     Fill = null,
                     IsHitTestVisible = false,
                     Opacity = 0.6,
-                    RenderTransform = new MatrixTransform(m)
+                    RenderTransform = new MatrixTransform(new Matrix(1, 0, 0, 1, -gb.X + contentPad, -gb.Y + contentPad))
                 };
-                GlyphCanvas.Children.Add(path);
+
+                host.Children.Add(path);
+                viewbox.Child = host;
+                GlyphCanvas.Children.Add(viewbox);
             }
         }
 
