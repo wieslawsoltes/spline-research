@@ -668,8 +668,8 @@ public partial class MainWindow : Window
             var poly = new Polyline
             {
                 Points = new Avalonia.Collections.AvaloniaList<Point>(_freehandPoints),
-                Stroke = Brushes.DarkGray,
-                StrokeThickness = 1,
+                Stroke = Brushes.Yellow,
+                StrokeThickness = 2,
                 IsHitTestVisible = false
             };
             EditorCanvas.Children.Add(poly);
