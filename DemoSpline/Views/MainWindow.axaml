@@ -32,6 +32,7 @@
                 <MenuItem Header="Edit Spline" Click="OnSelectEditTool" x:Name="EditToolMenu"/>
                 <MenuItem Header="Trace From Freehand" Click="OnSelectFreehandTool" x:Name="FreehandToolMenu"/>
                 <MenuItem Header="Open Tuner" Click="OnOpenTuner"/>
+                <MenuItem Header="Insert Glyph..." Click="OnOpenGlyphPicker"/>
                 <MenuItem Header="Use raw cubic (no curvature adjust)" Click="OnToggleRawCubic" x:Name="RawCubicMenu"/>
                 <MenuItem Header="Reduce Knots" Click="OnReduceKnots"/>
             </MenuItem>

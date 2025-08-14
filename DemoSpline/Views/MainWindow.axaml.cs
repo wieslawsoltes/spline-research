@@ -14,6 +14,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using DemoSpline.Models;
 using System;
+using Avalonia.Media.TextFormatting;
 
 namespace DemoSpline.Views;
 
@@ -30,6 +31,7 @@ public partial class MainWindow : Window
     private List<Spline.CP> _knots => EnsureActiveSubpath().Knots;
     private bool _isClosed { get => EnsureActiveSubpath().Closed; set => EnsureActiveSubpath().Closed = value; }
     private readonly List<BezierPath> _paths = new();
+    private readonly List<Geometry> _pendingGlyphs = new();
     private bool _showGrid = true;
     private Point? _lastPointer;
     private bool _dragging;
@@ -198,6 +200,30 @@ public partial class MainWindow : Window
     {
         var wnd = new HelpWindow();
         wnd.Show(this);
+    }
+
+    private void OnOpenGlyphPicker(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var wnd = new GlyphPickerWindow(this);
+        wnd.Show(this);
+    }
+
+    public void InsertGlyphGeometry(Geometry geom)
+    {
+        // Rebuild overlays on render to avoid being cleared; store as field list
+        _pendingGlyphs.Add(geom);
+        RenderAll();
+    }
+
+    // Keep method for potential future use, but prefer passing exact geometry from picker tiles
+    public void InsertGlyph(string family, int glyphIndex, double fontSize)
+    {
+        if (!FontManager.Current.TryGetGlyphTypeface(new Typeface(family), out var glyphTypeface) || glyphTypeface is null)
+            return;
+        var geom = new GlyphRun(glyphTypeface, fontSize, ReadOnlyMemory<char>.Empty, new ushort[] { (ushort)glyphIndex }).BuildGeometry();
+        if (geom is null) return;
+        _pendingGlyphs.Add(geom);
+        RenderAll();
     }
 
     private void OnToggleRawCubic(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -643,6 +669,36 @@ public partial class MainWindow : Window
         }
 
         RenderSelection();
+
+        // Draw glyph overlays (scaled to 80% of canvas height and centered)
+        if (_pendingGlyphs.Count > 0)
+        {
+            double cw = Math.Max(EditorCanvas.Bounds.Width, 1);
+            double ch = Math.Max(EditorCanvas.Bounds.Height, 1);
+            foreach (var geom in _pendingGlyphs)
+            {
+                var gb = geom.Bounds;
+                if (gb.Height <= 0 || gb.Width <= 0) continue;
+                double scale = 0.8 * ch / gb.Height;
+                if (!double.IsFinite(scale) || scale <= 0) scale = 1;
+                double targetW = gb.Width * scale;
+                double targetH = gb.Height * scale;
+                double tx = (cw - targetW) * 0.5 - gb.X * scale;
+                double ty = (ch - targetH) * 0.5 - gb.Y * scale;
+                var m = new Matrix(scale, 0, 0, scale, tx, ty);
+                var path = new Avalonia.Controls.Shapes.Path
+                {
+                    Data = geom,
+                    Stroke = Brushes.LightSlateGray,
+                    StrokeThickness = 1,
+                    Fill = null,
+                    IsHitTestVisible = false,
+                    Opacity = 0.6,
+                    RenderTransform = new MatrixTransform(m)
+                };
+                EditorCanvas.Children.Add(path);
+            }
+        }
 
         // Hover-to-add indicator near curve
         if (EditorCanvas.IsPointerOver && _svgHover && _paths.Count > 0)
