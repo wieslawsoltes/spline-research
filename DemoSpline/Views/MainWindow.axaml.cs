@@ -45,9 +45,23 @@ public partial class MainWindow : Window
     private Settings _settings = Settings.Load();
     private MenuItem? _showGridMenuItem;
     private MenuItem? _rawCubicMenuItem;
+    private MenuItem? _editToolMenuItem;
+    private MenuItem? _freehandToolMenuItem;
     private Point? _pointerPos;
 	private bool _svgHover;
     private bool _useRawCubic;
+
+    private enum ToolMode
+    {
+        EditSpline,
+        FreehandTrace
+    }
+
+    private ToolMode _tool = ToolMode.EditSpline;
+
+    // Freehand trace state
+    private bool _freehandActive;
+    private readonly List<Point> _freehandPoints = new();
 
     public MainWindow()
     {
@@ -65,6 +79,9 @@ public partial class MainWindow : Window
             {
                 _rawCubicMenuItem.IsChecked = _useRawCubic;
             }
+            _editToolMenuItem = this.FindControl<MenuItem>("EditToolMenu");
+            _freehandToolMenuItem = this.FindControl<MenuItem>("FreehandToolMenu");
+            UpdateToolMenuChecks();
             RenderAll();
         };
     }
@@ -163,6 +180,124 @@ public partial class MainWindow : Window
         RenderAll();
     }
 
+    private void OnReduceKnots(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (_knots.Count <= 2) return;
+        // Ask user for tolerance (in pixels)
+        _ = Dispatcher.UIThread.InvokeAsync(async () =>
+        {
+            double tol = 2.0;
+            try
+            {
+                var dlg = new Window
+                {
+                    Width = 320,
+                    Height = 160,
+                    Title = "Reduce Knots",
+                };
+                var tb = new TextBox { Text = tol.ToString(CultureInfo.InvariantCulture), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch, Margin = new Thickness(0, 6, 0, 0) };
+                var ok = new Button { Content = "OK", IsDefault = true, Margin = new Thickness(0, 10, 0, 0), HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right };
+                var sp = new StackPanel { Margin = new Thickness(10) };
+                sp.Children.Add(new TextBlock { Text = "Max deviation (px):" });
+                sp.Children.Add(tb);
+                sp.Children.Add(ok);
+                dlg.Content = sp;
+                ok.Click += (_, __) => dlg.Close();
+                await dlg.ShowDialog(this);
+                if (!double.TryParse(tb.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out tol)) tol = 2.0;
+            }
+            catch { }
+
+            ReduceKnotsByTolerance(tol);
+            RenderAll();
+        });
+    }
+
+    private void ReduceKnotsByTolerance(double tolerance)
+    {
+        if (_knots.Count <= 2) return;
+        // Greedy removal: try removing each non-end knot if error <= tolerance
+        bool changed;
+        int guard = 0;
+        do
+        {
+            changed = false;
+            guard++;
+            if (guard > 1000) break;
+
+            for (int i = 1; i < _knots.Count - 1; i++)
+            {
+                var candidate = _knots[i];
+                // Try removing
+                var backup = candidate;
+                _knots.RemoveAt(i);
+
+                // Solve and measure error of original curve samples against new curve
+                var spline = new Spline(new List<Spline.CP>(_knots), _isClosed);
+                spline.Solve();
+                spline.ComputeCurvatureBlending();
+                var path = spline.Render(_useRawCubic);
+
+                double maxErr = 0;
+                // Sample along the polyline that the knots represent (use linear interpolation of current knots)
+                for (int k = 0; k < _knots.Count - 1; k++)
+                {
+                    var a = _knots[k].Pt;
+                    var b = _knots[k + 1].Pt;
+                    int n = 8;
+                    for (int s = 0; s <= n; s++)
+                    {
+                        double t = (double)s / n;
+                        double x = a.X + t * (b.X - a.X);
+                        double y = a.Y + t * (b.Y - a.Y);
+                        var ht = path.HitTest(x, y);
+                        if (ht.BestDist > maxErr) maxErr = ht.BestDist;
+                        if (maxErr > tolerance) break;
+                    }
+                    if (maxErr > tolerance) break;
+                }
+
+                if (maxErr <= tolerance)
+                {
+                    changed = true;
+                    i--; // recheck same index after removal shift
+                }
+                else
+                {
+                    _knots.Insert(i, backup); // restore
+                }
+            }
+        } while (changed);
+    }
+
+    private void UpdateToolMenuChecks()
+    {
+        if (_editToolMenuItem != null) _editToolMenuItem.IsChecked = _tool == ToolMode.EditSpline;
+        if (_freehandToolMenuItem != null) _freehandToolMenuItem.IsChecked = _tool == ToolMode.FreehandTrace;
+    }
+
+    private void OnSelectEditTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _tool = ToolMode.EditSpline;
+        _freehandActive = false;
+        _freehandPoints.Clear();
+        UpdateToolMenuChecks();
+        RenderAll();
+    }
+
+    private void OnSelectFreehandTool(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _tool = ToolMode.FreehandTrace;
+        _dragging = false;
+        _dragTan = false;
+        _activeKnot = null;
+        _creating = false;
+        _freehandActive = false;
+        _freehandPoints.Clear();
+        UpdateToolMenuChecks();
+        RenderAll();
+    }
+
 
     private void OnDeletePoint(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
@@ -186,6 +321,15 @@ public partial class MainWindow : Window
         _lastPointer = p;
         _dragTan = false;
         _shiftOnDrag = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+
+        if (_tool == ToolMode.FreehandTrace)
+        {
+            _freehandActive = true;
+            _freehandPoints.Clear();
+            _freehandPoints.Add(p);
+            RenderAll();
+            return;
+        }
 
         // First hit test tangent handles created in RenderSel via Tag
         if (e.Source is Shape sh && sh.Tag is TanHandleTag tag)
@@ -269,6 +413,15 @@ public partial class MainWindow : Window
     {
         var p = e.GetPosition(EditorCanvas);
         _pointerPos = p;
+        if (_tool == ToolMode.FreehandTrace)
+        {
+            if (_freehandActive)
+            {
+                _freehandPoints.Add(p);
+                RenderAll();
+            }
+            return;
+        }
         if (_dragTan && _tanKnot != null)
         {
             UpdateTan(_tanKnot, p, e.KeyModifiers);
@@ -310,6 +463,19 @@ public partial class MainWindow : Window
 
     private void OnPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
+        if (_tool == ToolMode.FreehandTrace)
+        {
+            if (_freehandActive && _freehandPoints.Count > 2)
+            {
+                // Process freehand polyline into spline knots
+                ProcessFreehandPolyline();
+            }
+            _freehandActive = false;
+            _freehandPoints.Clear();
+            RenderAll();
+            return;
+        }
+
         _dragging = false;
         _dragTan = false;
         _activeKnot = null;
@@ -381,6 +547,19 @@ public partial class MainWindow : Window
             }
         }
 
+        // Draw freehand overlay when active
+        if (_tool == ToolMode.FreehandTrace && _freehandPoints.Count > 1)
+        {
+            var poly = new Polyline
+            {
+                Points = new Avalonia.Collections.AvaloniaList<Point>(_freehandPoints),
+                Stroke = Brushes.DarkGray,
+                StrokeThickness = 1,
+                IsHitTestVisible = false
+            };
+            EditorCanvas.Children.Add(poly);
+        }
+
         RenderSelection();
 
         // Hover-to-add indicator near curve
@@ -400,6 +579,91 @@ public partial class MainWindow : Window
                 }
             }
         }
+    }
+
+    private void ProcessFreehandPolyline()
+    {
+        // Parameters can later be exposed via UI
+        double simplifyTolerance = 2.0; // pixels
+        double cornerAngleThresholdDeg = 35.0; // degrees
+        double targetSpacing = 20.0; // pixels between knots in smooth spans
+        double fitTolerance = 2.5; // optional refinement tolerance (pixels)
+        int maxIterations = 2; // lightweight refinement
+
+        // 1) Simplify with RDP
+        var simplified = PolylineUtils.RamerDouglasPeucker(_freehandPoints, simplifyTolerance);
+        if (simplified.Count < 2) return;
+
+        // 2) Detect corners
+        var corners = PolylineUtils.DetectCorners(simplified, cornerAngleThresholdDeg * Math.PI / 180.0);
+
+        // 3) Segment at corners and place knots
+        var newKnots = new List<Spline.CP>();
+        int start = 0;
+        for (int i = 0; i < simplified.Count; i++)
+        {
+            bool isCornerHere = corners.Contains(i) || i == simplified.Count - 1;
+            if (isCornerHere)
+            {
+                // Resample the span [start, i] by arc-length spacing
+                var sampled = PolylineUtils.ResampleBySpacing(simplified, start, i, targetSpacing);
+                for (int s = 0; s < sampled.Count; s++)
+                {
+                    var pt = sampled[s];
+                    bool isCorner = (s == 0 && newKnots.Count == 0) || (s == sampled.Count - 1) || corners.Contains(start + s);
+                    var cp = new Spline.CP(new Vec2(pt.X, pt.Y), isCorner ? "corner" : "smooth", null, null);
+                    // De-duplicate close points
+                    if (newKnots.Count == 0 || Math.Abs(newKnots[^1].Pt.X - cp.Pt.X) + Math.Abs(newKnots[^1].Pt.Y - cp.Pt.Y) > 0.5)
+                    {
+                        newKnots.Add(cp);
+                    }
+                }
+                start = i;
+            }
+        }
+
+        // Clamp to at least two knots
+        if (newKnots.Count < 2) return;
+
+        // 4) Optional refinement by max deviation (coarse):
+        //    evaluate current spline and insert extra knots at max-error locations
+        for (int iter = 0; iter < maxIterations; iter++)
+        {
+            // Assign and solve current knots
+            _knots.Clear();
+            _knots.AddRange(newKnots);
+            _isClosed = false;
+
+            var spline = new Spline(new List<Spline.CP>(_knots), _isClosed);
+            spline.Solve();
+            spline.ComputeCurvatureBlending();
+            var path = spline.Render(_useRawCubic);
+
+            // Sample the simplified polyline and find worst deviation to path
+            double maxErr = 0;
+            Point? worstPt = null;
+            for (int i = 0; i < simplified.Count; i++)
+            {
+                var p = simplified[i];
+                var ht = path.HitTest(p.X, p.Y);
+                if (ht.BestDist > maxErr)
+                {
+                    maxErr = ht.BestDist;
+                    worstPt = p;
+                }
+            }
+            if (worstPt == null || maxErr <= fitTolerance) break;
+
+            // Insert a knot at the worst point's nearest segment location
+            int insertIx = newKnots.Count;
+            var ht2 = path.HitTest(worstPt.Value.X, worstPt.Value.Y);
+            if (ht2.BestMark.HasValue) insertIx = Math.Clamp(ht2.BestMark.Value + 1, 1, newKnots.Count);
+            newKnots.Insert(insertIx, new Spline.CP(new Vec2(worstPt.Value.X, worstPt.Value.Y), "smooth", null, null));
+        }
+
+        _knots.Clear();
+        _knots.AddRange(newKnots);
+        _isClosed = false;
     }
 
     private Point? GetPositionInCanvas()
