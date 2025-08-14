@@ -40,7 +40,11 @@
                 <MenuItem Header="About &amp; help" Click="OnOpenHelp"/>
             </MenuItem>
         </Menu>
-        <Canvas x:Name="EditorCanvas" Grid.Row="1" Background="#FFFFFFFF"/>
+        <Grid Grid.Row="1">
+            <Canvas x:Name="GridCanvas" Background="#FFFFFFFF" IsHitTestVisible="False"/>
+            <Canvas x:Name="GlyphCanvas" Background="Transparent" IsHitTestVisible="False"/>
+            <Canvas x:Name="EditorCanvas" Background="Transparent"/>
+        </Grid>
     </Grid>
 
 </Window>

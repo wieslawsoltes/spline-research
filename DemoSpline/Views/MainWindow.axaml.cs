@@ -104,9 +104,12 @@ public partial class MainWindow : Window
         EditorCanvas.PointerPressed += OnPointerPressed;
         EditorCanvas.PointerMoved += OnPointerMoved;
         EditorCanvas.PointerReleased += OnPointerReleased;
-		EditorCanvas.PointerEntered += (_, ev) => { _pointerPos = ev.GetPosition(EditorCanvas); _svgHover = true; RenderAll(); };
-		EditorCanvas.PointerExited += (_, __) => { _pointerPos = null; _svgHover = false; RenderAll(); };
+        EditorCanvas.PointerEntered += (_, ev) => { _pointerPos = ev.GetPosition(EditorCanvas); _svgHover = true; RenderAll(); };
+        EditorCanvas.PointerExited += (_, __) => { _pointerPos = null; _svgHover = false; RenderAll(); };
+        // Re-render on size changes of any canvas layer
         EditorCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
+        GridCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
+        GlyphCanvas.GetObservable(BoundsProperty).Subscribe(new Avalonia.Reactive.AnonymousObserver<Rect>(_ => RenderAll()));
         this.KeyDown += OnKeyDown;
         RenderAll();
     }
@@ -182,6 +185,7 @@ public partial class MainWindow : Window
     {
         _subpaths.Clear();
         _paths.Clear();
+        _pendingGlyphs.Clear();
         _activeSubpath = 0;
         _selection.Clear();
         _activeKnot = null;
@@ -608,24 +612,27 @@ public partial class MainWindow : Window
 
     private void RenderAll()
     {
+        // Clear layers
+        GridCanvas.Children.Clear();
+        GlyphCanvas.Children.Clear();
         EditorCanvas.Children.Clear();
 
         if (_showGrid)
         {
-            double w = Math.Max(EditorCanvas.Bounds.Width, 1);
-            double h = Math.Max(EditorCanvas.Bounds.Height, 1);
+            double w = Math.Max(GridCanvas.Bounds.Width, 1);
+            double h = Math.Max(GridCanvas.Bounds.Height, 1);
             double g = 20;
             for (double x = 0; x < w; x += g)
             {
                 var line = new Line { StartPoint = new Point(x, 0), EndPoint = new Point(x, h), Stroke = new SolidColorBrush(Color.FromRgb(221,221,255)), StrokeThickness = 1, IsHitTestVisible = false };
                 Canvas.SetLeft(line, 0);
                 Canvas.SetTop(line, 0);
-                EditorCanvas.Children.Add(line);
+                GridCanvas.Children.Add(line);
             }
             for (double y = 0; y < h; y += g)
             {
                 var line = new Line { StartPoint = new Point(0, y), EndPoint = new Point(w, y), Stroke = new SolidColorBrush(Color.FromRgb(221,221,255)), StrokeThickness = 1, IsHitTestVisible = false };
-                EditorCanvas.Children.Add(line);
+                GridCanvas.Children.Add(line);
             }
         }
 
@@ -670,11 +677,11 @@ public partial class MainWindow : Window
 
         RenderSelection();
 
-        // Draw glyph overlays (scaled to 80% of canvas height and centered)
+        // Draw glyph overlays (scaled to 80% of glyph canvas height and centered) on glyph layer
         if (_pendingGlyphs.Count > 0)
         {
-            double cw = Math.Max(EditorCanvas.Bounds.Width, 1);
-            double ch = Math.Max(EditorCanvas.Bounds.Height, 1);
+            double cw = Math.Max(GlyphCanvas.Bounds.Width, 1);
+            double ch = Math.Max(GlyphCanvas.Bounds.Height, 1);
             foreach (var geom in _pendingGlyphs)
             {
                 var gb = geom.Bounds;
@@ -696,7 +703,7 @@ public partial class MainWindow : Window
                     Opacity = 0.6,
                     RenderTransform = new MatrixTransform(m)
                 };
-                EditorCanvas.Children.Add(path);
+                GlyphCanvas.Children.Add(path);
             }
         }
 
