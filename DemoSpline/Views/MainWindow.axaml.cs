@@ -1147,8 +1147,8 @@ public partial class MainWindow : Window
             }
         }
 
-        // Hover-to-add indicator near curve
-        if (EditorCanvas.IsPointerOver && _svgHover && _paths.Count > 0)
+        // Hover-to-add indicator near curve (but not when knots are selected)
+        if (EditorCanvas.IsPointerOver && _svgHover && _paths.Count > 0 && _selection.Count == 0)
         {
             var pos = this.GetPositionInCanvas();
             if (pos.HasValue)
