@@ -273,6 +273,200 @@ public partial class MainWindow : Window
         });
     }
 
+    private async void OnFairCurvature(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        // Dialog for parameters
+        double maxMovePx = 4.0;
+        double curvatureWeight = 1.0;
+        double fitTolerance = 2.0;
+        try
+        {
+            var dlg = new Window { Width = 360, Height = 220, Title = "Fair Curvature" };
+            var sp = new StackPanel { Margin = new Thickness(10) };
+            var tbMove = new TextBox { Text = maxMovePx.ToString(CultureInfo.InvariantCulture) };
+            var tbCurv = new TextBox { Text = curvatureWeight.ToString(CultureInfo.InvariantCulture) };
+            var tbTol = new TextBox { Text = fitTolerance.ToString(CultureInfo.InvariantCulture) };
+            sp.Children.Add(new TextBlock { Text = "Max move (px):" });
+            sp.Children.Add(tbMove);
+            sp.Children.Add(new TextBlock { Text = "Curvature weight:" });
+            sp.Children.Add(tbCurv);
+            sp.Children.Add(new TextBlock { Text = "Fit tolerance (px):" });
+            sp.Children.Add(tbTol);
+            var ok = new Button { Content = "OK", IsDefault = true, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Margin = new Thickness(0,10,0,0) };
+            sp.Children.Add(ok);
+            dlg.Content = sp;
+            ok.Click += (_, __) => dlg.Close();
+            await dlg.ShowDialog(this);
+            double.TryParse(tbMove.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out maxMovePx);
+            double.TryParse(tbCurv.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out curvatureWeight);
+            double.TryParse(tbTol.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out fitTolerance);
+        }
+        catch { }
+
+        FairCurvatureAll(maxMovePx, curvatureWeight, fitTolerance);
+        RenderAll();
+    }
+
+    private async void OnStraightenSpans(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        double straightnessEpsDeg = 6.0; // angle threshold for near-collinearity
+        double maxMovePx = 4.0;
+        double fitTolerance = 2.0;
+        try
+        {
+            var dlg = new Window { Width = 360, Height = 220, Title = "Straighten Spans" };
+            var sp = new StackPanel { Margin = new Thickness(10) };
+            var tbEps = new TextBox { Text = straightnessEpsDeg.ToString(CultureInfo.InvariantCulture) };
+            var tbMove = new TextBox { Text = maxMovePx.ToString(CultureInfo.InvariantCulture) };
+            var tbTol = new TextBox { Text = fitTolerance.ToString(CultureInfo.InvariantCulture) };
+            sp.Children.Add(new TextBlock { Text = "Straightness ε (deg):" });
+            sp.Children.Add(tbEps);
+            sp.Children.Add(new TextBlock { Text = "Max move (px):" });
+            sp.Children.Add(tbMove);
+            sp.Children.Add(new TextBlock { Text = "Fit tolerance (px):" });
+            sp.Children.Add(tbTol);
+            var ok = new Button { Content = "OK", IsDefault = true, HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Right, Margin = new Thickness(0,10,0,0) };
+            sp.Children.Add(ok);
+            dlg.Content = sp;
+            ok.Click += (_, __) => dlg.Close();
+            await dlg.ShowDialog(this);
+            double.TryParse(tbEps.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out straightnessEpsDeg);
+            double.TryParse(tbMove.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out maxMovePx);
+            double.TryParse(tbTol.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out fitTolerance);
+        }
+        catch { }
+
+        StraightenSpansAll(straightnessEpsDeg * Math.PI / 180.0, maxMovePx, fitTolerance);
+        RenderAll();
+    }
+
+    private void FairCurvatureAll(double maxMovePx, double curvatureWeight, double fitTolerance)
+    {
+        if (_subpaths.Count == 0) return;
+        foreach (var sp in _subpaths)
+        {
+            if (sp.Knots.Count < 3) continue;
+            // Work on a copy for deviation checks
+            var original = sp.Knots.Select(k => new Spline.CP(new Vec2(k.Pt.X, k.Pt.Y), k.Ty, k.LTh, k.RTh)).ToList();
+
+            int iterations = 2;
+            for (int it = 0; it < iterations; it++)
+            {
+                for (int i = 1; i < sp.Knots.Count - 1; i++)
+                {
+                    var k = sp.Knots[i];
+                    if (k.Ty == "corner") continue;
+                    var prev = sp.Knots[i - 1].Pt;
+                    var next = sp.Knots[i + 1].Pt;
+                    // Laplacian target
+                    var target = new Vec2((prev.X + next.X) * 0.5, (prev.Y + next.Y) * 0.5);
+                    var cur = k.Pt;
+                    var delta = new Vec2(target.X - cur.X, target.Y - cur.Y);
+                    double len = Math.Sqrt(delta.X * delta.X + delta.Y * delta.Y);
+                    if (len < 1e-6) continue;
+                    double step = Math.Min(maxMovePx, len);
+                    var candidate = new Vec2(cur.X + delta.X / len * step, cur.Y + delta.Y / len * step);
+
+                    // Evaluate deviation and simple curvature proxy improvement
+                    bool accept = ImprovesFairnessWithTolerance(original, sp.Knots, i, candidate, fitTolerance, curvatureWeight);
+                    if (accept) k.Pt = candidate;
+                }
+            }
+        }
+    }
+
+    private void StraightenSpansAll(double straightnessEpsRad, double maxMovePx, double fitTolerance)
+    {
+        foreach (var sp in _subpaths)
+        {
+            if (sp.Knots.Count < 3) continue;
+            var original = sp.Knots.Select(k => new Spline.CP(new Vec2(k.Pt.X, k.Pt.Y), k.Ty, k.LTh, k.RTh)).ToList();
+            int i = 0;
+            while (i + 2 < sp.Knots.Count)
+            {
+                var a = sp.Knots[i]; var b = sp.Knots[i + 1]; var c = sp.Knots[i + 2];
+                if (a.Ty == "corner" || b.Ty == "corner" || c.Ty == "corner") { i++; continue; }
+                double abx = b.Pt.X - a.Pt.X, aby = b.Pt.Y - a.Pt.Y;
+                double bcx = c.Pt.X - b.Pt.X, bcy = c.Pt.Y - b.Pt.Y;
+                double dot = abx * bcx + aby * bcy;
+                double la = Math.Sqrt(abx * abx + aby * aby);
+                double lb = Math.Sqrt(bcx * bcx + bcy * bcy);
+                if (la < 1e-6 || lb < 1e-6) { i++; continue; }
+                double cosang = Math.Clamp(dot / (la * lb), -1, 1);
+                double ang = Math.Acos(cosang);
+                if (ang < straightnessEpsRad)
+                {
+                    // Project b to line ac with clamped maxMovePx
+                    var acx = c.Pt.X - a.Pt.X; var acy = c.Pt.Y - a.Pt.Y;
+                    double acl2 = acx * acx + acy * acy; if (acl2 < 1e-12) { i++; continue; }
+                    double t = ((b.Pt.X - a.Pt.X) * acx + (b.Pt.Y - a.Pt.Y) * acy) / acl2;
+                    t = Math.Clamp(t, 0, 1);
+                    var proj = new Vec2(a.Pt.X + t * acx, a.Pt.Y + t * acy);
+                    var delta = new Vec2(proj.X - b.Pt.X, proj.Y - b.Pt.Y);
+                    double len = Math.Sqrt(delta.X * delta.X + delta.Y * delta.Y);
+                    if (len > 1e-6)
+                    {
+                        double step = Math.Min(len, maxMovePx);
+                        var candidate = new Vec2(b.Pt.X + delta.X / len * step, b.Pt.Y + delta.Y / len * step);
+                        bool accept = ImprovesFairnessWithTolerance(original, sp.Knots, i + 1, candidate, fitTolerance, 0.0);
+                        if (accept) b.Pt = candidate;
+                    }
+                }
+                i++;
+            }
+        }
+    }
+
+    private bool ImprovesFairnessWithTolerance(List<Spline.CP> originalCopy, List<Spline.CP> current, int index, Vec2 candidate, double fitTolerance, double curvatureWeight)
+    {
+        // Build temp knot list with candidate
+        var temp = current.Select((k, idx) => new Spline.CP(new Vec2(idx == index ? candidate.X : k.Pt.X, idx == index ? candidate.Y : k.Pt.Y), k.Ty, k.LTh, k.RTh)).ToList();
+        // Evaluate geometric deviation w.r.t original path
+        var origSpline = new Spline(originalCopy, false);
+        origSpline.Solve();
+        origSpline.ComputeCurvatureBlending();
+        var origPath = origSpline.Render(_useRawCubic);
+
+        var newSpline = new Spline(temp, false);
+        newSpline.Solve();
+        newSpline.ComputeCurvatureBlending();
+        var newPath = newSpline.Render(_useRawCubic);
+
+        // Sample original knots as witnesses
+        double maxDev = 0;
+        for (int i = 0; i < originalCopy.Count; i++)
+        {
+            var p = originalCopy[i].Pt;
+            var ht = newPath.HitTest(p.X, p.Y);
+            if (ht.BestDist > maxDev) maxDev = ht.BestDist;
+            if (maxDev > fitTolerance) break;
+        }
+        if (maxDev > fitTolerance) return false;
+
+        if (curvatureWeight <= 0) return true;
+        // Simple curvature proxy: sum of turning angles deviation
+        double CurvProxy(List<Spline.CP> list)
+        {
+            double s = 0;
+            for (int i = 1; i + 1 < list.Count; i++)
+            {
+                var a = list[i - 1].Pt; var b = list[i].Pt; var c = list[i + 1].Pt;
+                double abx = b.X - a.X, aby = b.Y - a.Y;
+                double bcx = c.X - b.X, bcy = c.Y - b.Y;
+                double la = Math.Sqrt(abx * abx + aby * aby);
+                double lb = Math.Sqrt(bcx * bcx + bcy * bcy);
+                if (la < 1e-6 || lb < 1e-6) continue;
+                double cosang = Math.Clamp((abx * bcx + aby * bcy) / (la * lb), -1, 1);
+                double ang = Math.Acos(cosang);
+                s += ang * ang;
+            }
+            return s;
+        }
+        double curCurv = CurvProxy(current);
+        double newCurv = CurvProxy(temp);
+        return newCurv <= curCurv;
+    }
+
     private void ReduceKnotsByToleranceAll(double tolerance)
     {
         foreach (var sp in _subpaths)
